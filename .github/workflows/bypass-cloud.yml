@@ -1,0 +1,78 @@
+name: Bypass Cloud
+
+on:
+  schedule:
+    - cron: "0 0 * * 0" # runs at 00:00 every Sunday
+  workflow_dispatch:
+
+jobs:
+  bypass-cloud:
+    runs-on: ubuntu-latest
+    env:
+      FEATURE_BRANCH: "bypass-cloud"
+    steps:
+      - name: Checkout fork repository and feature branch
+        id: checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.FEATURE_BRANCH }}
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+
+      - name: Add bypass logic
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/netdata/netdata.git
+          git fetch upstream master
+          git checkout -B $FEATURE_BRANCH upstream/master
+
+          # --- Guards: fail loudly if upstream moved anything ---
+          if ! sed -n '/static inline bool http_access_user_has_enough_access_level_for_endpoint/,/}/p' "src/libnetdata/user-auth/http-access.h" | grep -q "return ((user & endpoint) == endpoint);"; then
+            echo "::error::Auth patch failed! Upstream changed the http_access function. Update your regex."
+            exit 1
+          fi
+          if ! grep -q "      - master" ".github/workflows/packaging.yml"; then
+            echo "::error::Trigger patch failed! Upstream changed the push: branches."
+            exit 1
+          fi
+          if ! grep -q "sudo apt-get install -y python3-ruamel\.yaml" ".github/workflows/packaging.yml"; then
+            echo "::error::Dependency patch failed! Upstream changed the apt-get install line."
+            exit 1
+          fi
+          if ! grep -q 'echo "Generated matrix: ${matrix}"' ".github/workflows/packaging.yml"; then
+            echo "::error::Matrix patch failed! Upstream changed the matrix generation script."
+            exit 1
+          fi
+
+          # --- The actual auth bypass ---
+          sed -i '/static inline bool http_access_user_has_enough_access_level_for_endpoint/,/}/ s/[ \t]*return ((user & endpoint) == endpoint);/    return true;/' "src/libnetdata/user-auth/http-access.h"
+
+          # --- Make packaging.yml build on this branch ---
+          sed -i "s|      - master|      - master\n      - ${FEATURE_BRANCH}|" ".github/workflows/packaging.yml"
+          sed -i 's/sudo apt-get install -y python3-ruamel\.yaml/& jq/' ".github/workflows/packaging.yml"
+
+          # --- CHANGE THIS LINE to pick your build target ---
+          sed -i "s@^\([ \t]*\)echo \"Generated matrix: \${matrix}\"@\1matrix=\$(echo \"\${matrix}\" | jq -c '{include: [.include[] | select(.distro == \"debian\" and .version == \"13\" and .arch == \"amd64\")]}')\n\1echo \"Generated matrix: \${matrix}\"@" ".github/workflows/packaging.yml"
+
+          # --- Strip steps that need netdata's private secrets / telemetry ---
+          sed -i '/- name: Failure Notification/,/^[ \t]*}}/d' ".github/workflows/packaging.yml"
+          sed -i '/^  prepare-topology-ip-intel-stock:/,/^  build:/ { /^  build:/!d }' ".github/workflows/packaging.yml"
+          sed -i '/^  build:/,/^[ \t]*steps:/ { /- prepare-topology-ip-intel-stock/d }' ".github/workflows/packaging.yml"
+          sed -i '/- name: Download topology-ip-intel stock payload/,/- name: Build Packages/ { /- name: Build Packages/!d }' ".github/workflows/packaging.yml"
+          sed -i '/-e NETDATA_TOPOLOGY_IP_INTEL_STOCK_DIR/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: Set Sentry telemetry env vars/,/- name: Setup QEMU/ { /- name: Setup QEMU/!d }' ".github/workflows/packaging.yml"
+          sed -i 's/-e ENABLE_SENTRY=... matrix.bundle_sentry ..//g' ".github/workflows/packaging.yml"
+          sed -i 's/-e RELEASE_PIPELINE=... env.RELEASE_PIPELINE ..//g' ".github/workflows/packaging.yml"
+          sed -i 's/-e UPLOAD_SENTRY=... env.UPLOAD_SENTRY ..//g' ".github/workflows/packaging.yml"
+          sed -i '/-e SENTRY_AUTH_TOKEN/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: Import GPG Keys/,/gpg_private_key:/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: Sign DEB Packages/,/run: \.github\/scripts\/deb-sign\.sh/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: SSH setup/,/known_hosts:/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: Upload to packages\.netdata\.cloud/,/needs\.version-check\.outputs\.repo/d' ".github/workflows/packaging.yml"
+          sed -i '/- name: Upload to packages2\.netdata\.cloud/,/needs\.version-check\.outputs\.repo/d' ".github/workflows/packaging.yml"
+
+          git add "src/libnetdata/user-auth/http-access.h" ".github/workflows/packaging.yml"
+          git commit -m "feature: bypass Netdata Cloud when accessing advanced features"
+          git push origin $FEATURE_BRANCH --force-with-lease
