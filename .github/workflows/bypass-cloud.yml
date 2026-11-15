@@ -70,8 +70,12 @@ jobs:
           sed -i '/- name: Import GPG Keys/,/gpg_private_key:/d' ".github/workflows/packaging.yml"
           sed -i '/- name: Sign DEB Packages/,/run: \.github\/scripts\/deb-sign\.sh/d' ".github/workflows/packaging.yml"
           sed -i '/- name: SSH setup/,/known_hosts:/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: Upload to packages\.netdata\.cloud/,/needs\.version-check\.outputs\.repo/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: Upload to packages2\.netdata\.cloud/,/needs\.version-check\.outputs\.repo/d' ".github/workflows/packaging.yml"
+          awk '
+            /^      - name: Upload to packages2?\.netdata\.cloud/ { skip=1; next }
+            skip && (/^      - name: / || /^  [A-Za-z_]/ || /^[A-Za-z_]/) { skip=0 }
+            !skip { print }
+          ' ".github/workflows/packaging.yml" > packaging.yml.tmp \
+            && mv packaging.yml.tmp ".github/workflows/packaging.yml"
 
           git add "src/libnetdata/user-auth/http-access.h" ".github/workflows/packaging.yml"
           git commit -m "feature: bypass Netdata Cloud when accessing advanced features"
