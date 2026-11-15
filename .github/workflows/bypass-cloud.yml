@@ -130,7 +130,8 @@ jobs:
 
           # ---------------------------------------------------------------
           # Scrub leftover -e secret/telemetry flags from the Build Packages
-          # docker run command. (The dots hide ${{ }} from the GH parser.)
+          # docker run command. (The dots in the patterns stand in for the
+          # GitHub expression braces so the parser doesn't read them.)
           # ---------------------------------------------------------------
           sed -i 's/-e ENABLE_SENTRY=... matrix.bundle_sentry ..//g' "$PKG"
           sed -i 's/-e RELEASE_PIPELINE=... env.RELEASE_PIPELINE ..//g' "$PKG"
