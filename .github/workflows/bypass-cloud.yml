@@ -21,62 +21,159 @@ jobs:
 
       - name: Add bypass logic
         run: |
+          set -euo pipefail
+          PKG=".github/workflows/packaging.yml"
+
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git remote add upstream https://github.com/netdata/netdata.git
           git fetch upstream master
-          git checkout -B $FEATURE_BRANCH upstream/master
+          git checkout -B "$FEATURE_BRANCH" upstream/master
 
-          # --- Guards: fail loudly if upstream moved anything ---
+          # ---------------------------------------------------------------
+          # Helpers: edit by STRUCTURE (step/job boundaries), not by content
+          # anchors. Each deletion is guarded so an upstream rename fails the
+          # run loudly instead of silently producing a broken workflow.
+          # ---------------------------------------------------------------
+
+          # Delete a workflow STEP by its exact name (handles repeated names),
+          # bounded by the next step / job / top-level key.
+          del_step() {
+            local name="$1"
+            if ! grep -qF "      - name: ${name}" "$PKG"; then
+              echo "::error::Step '${name}' not found in packaging.yml — upstream renamed/removed it. Update bypass-cloud.yml."
+              exit 1
+            fi
+            awk -v target="      - name: ${name}" '
+              { line=$0; sub(/[ \t]+$/,"",line) }
+              line == target { skip=1; next }
+              skip && (/^      - / || /^  [A-Za-z_]/ || /^[A-Za-z_]/) { skip=0 }
+              !skip { print }
+            ' "$PKG" > "${PKG}.tmp" && mv "${PKG}.tmp" "$PKG"
+          }
+
+          # Delete a whole JOB by name, bounded by the next job / top-level key.
+          del_job() {
+            local job="$1"
+            if ! grep -qE "^  ${job}:([[:space:]]|#|$)" "$PKG"; then
+              echo "::error::Job '${job}' not found in packaging.yml — upstream changed it. Update bypass-cloud.yml."
+              exit 1
+            fi
+            awk -v target="  ${job}:" '
+              index($0, target)==1 { skip=1; next }
+              skip && (/^  [A-Za-z_]/ || /^[A-Za-z_]/) { skip=0 }
+              !skip { print }
+            ' "$PKG" > "${PKG}.tmp" && mv "${PKG}.tmp" "$PKG"
+          }
+
+          # ---------------------------------------------------------------
+          # Guards: fail loudly if upstream moved any patch target.
+          # ---------------------------------------------------------------
           if ! sed -n '/static inline bool http_access_user_has_enough_access_level_for_endpoint/,/}/p' "src/libnetdata/user-auth/http-access.h" | grep -q "return ((user & endpoint) == endpoint);"; then
             echo "::error::Auth patch failed! Upstream changed the http_access function. Update your regex."
             exit 1
           fi
-          if ! grep -q "      - master" ".github/workflows/packaging.yml"; then
+          if ! grep -q "      - master" "$PKG"; then
             echo "::error::Trigger patch failed! Upstream changed the push: branches."
             exit 1
           fi
-          if ! grep -q "sudo apt-get install -y python3-ruamel\.yaml" ".github/workflows/packaging.yml"; then
+          if ! grep -q "sudo apt-get install -y python3-ruamel\.yaml" "$PKG"; then
             echo "::error::Dependency patch failed! Upstream changed the apt-get install line."
             exit 1
           fi
-          if ! grep -q 'echo "Generated matrix: ${matrix}"' ".github/workflows/packaging.yml"; then
+          if ! grep -q 'echo "Generated matrix: ${matrix}"' "$PKG"; then
             echo "::error::Matrix patch failed! Upstream changed the matrix generation script."
             exit 1
           fi
 
-          # --- The actual auth bypass ---
+          # ---------------------------------------------------------------
+          # The actual auth bypass.
+          # ---------------------------------------------------------------
           sed -i '/static inline bool http_access_user_has_enough_access_level_for_endpoint/,/}/ s/[ \t]*return ((user & endpoint) == endpoint);/    return true;/' "src/libnetdata/user-auth/http-access.h"
 
-          # --- Make packaging.yml build on this branch ---
-          sed -i "s|      - master|      - master\n      - ${FEATURE_BRANCH}|" ".github/workflows/packaging.yml"
-          sed -i 's/sudo apt-get install -y python3-ruamel\.yaml/& jq/' ".github/workflows/packaging.yml"
+          # ---------------------------------------------------------------
+          # Make packaging.yml build on this branch + add jq dependency.
+          # ---------------------------------------------------------------
+          sed -i "s|      - master|      - master\n      - ${FEATURE_BRANCH}|" "$PKG"
+          sed -i 's/sudo apt-get install -y python3-ruamel\.yaml/& jq/' "$PKG"
 
-          # --- CHANGE THIS LINE to pick your build target ---
-          sed -i "s@^\([ \t]*\)echo \"Generated matrix: \${matrix}\"@\1matrix=\$(echo \"\${matrix}\" | jq -c '{include: [.include[] | select(.distro == \"debian\" and .version == \"13\" and .arch == \"amd64\")]}')\n\1echo \"Generated matrix: \${matrix}\"@" ".github/workflows/packaging.yml"
+          # ---------------------------------------------------------------
+          # CHANGE THIS to pick your build target(s). Artifact is named
+          # "<distro>-<version>-<arch>-packages" (arch: amd64/arm64 for
+          # debian/ubuntu, x86_64/aarch64 for fedora).
+          # ---------------------------------------------------------------
+          sed -i "s@^\([ \t]*\)echo \"Generated matrix: \${matrix}\"@\1matrix=\$(echo \"\${matrix}\" | jq -c '{include: [.include[] | select(.distro == \"debian\" and .version == \"13\" and .arch == \"amd64\")]}')\n\1echo \"Generated matrix: \${matrix}\"@" "$PKG"
 
-          # --- Strip steps that need netdata's private secrets / telemetry ---
-          sed -i '/- name: Failure Notification/,/^[ \t]*}}/d' ".github/workflows/packaging.yml"
-          sed -i '/^  prepare-topology-ip-intel-stock:/,/^  build:/ { /^  build:/!d }' ".github/workflows/packaging.yml"
-          sed -i '/^  build:/,/^[ \t]*steps:/ { /- prepare-topology-ip-intel-stock/d }' ".github/workflows/packaging.yml"
-          sed -i '/- name: Download topology-ip-intel stock payload/,/- name: Build Packages/ { /- name: Build Packages/!d }' ".github/workflows/packaging.yml"
-          sed -i '/-e NETDATA_TOPOLOGY_IP_INTEL_STOCK_DIR/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: Set Sentry telemetry env vars/,/- name: Setup QEMU/ { /- name: Setup QEMU/!d }' ".github/workflows/packaging.yml"
-          sed -i 's/-e ENABLE_SENTRY=... matrix.bundle_sentry ..//g' ".github/workflows/packaging.yml"
-          sed -i 's/-e RELEASE_PIPELINE=... env.RELEASE_PIPELINE ..//g' ".github/workflows/packaging.yml"
-          sed -i 's/-e UPLOAD_SENTRY=... env.UPLOAD_SENTRY ..//g' ".github/workflows/packaging.yml"
-          sed -i '/-e SENTRY_AUTH_TOKEN/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: Import GPG Keys/,/gpg_private_key:/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: Sign DEB Packages/,/run: \.github\/scripts\/deb-sign\.sh/d' ".github/workflows/packaging.yml"
-          sed -i '/- name: SSH setup/,/known_hosts:/d' ".github/workflows/packaging.yml"
-          awk '
-            /^      - name: Upload to packages2?\.netdata\.cloud/ { skip=1; next }
-            skip && (/^      - name: / || /^  [A-Za-z_]/ || /^[A-Za-z_]/) { skip=0 }
-            !skip { print }
-          ' ".github/workflows/packaging.yml" > packaging.yml.tmp \
-            && mv packaging.yml.tmp ".github/workflows/packaging.yml"
+          # ---------------------------------------------------------------
+          # Remove the topology-ip-intel job and its build.needs reference.
+          # ---------------------------------------------------------------
+          del_job "prepare-topology-ip-intel-stock"
+          if ! grep -qE "^      - prepare-topology-ip-intel-stock$" "$PKG"; then
+            echo "::error::Expected 'prepare-topology-ip-intel-stock' in build.needs — upstream changed it."
+            exit 1
+          fi
+          sed -i '/^      - prepare-topology-ip-intel-stock$/d' "$PKG"
 
-          git add "src/libnetdata/user-auth/http-access.h" ".github/workflows/packaging.yml"
+          # ---------------------------------------------------------------
+          # Strip steps that need netdata's private secrets / telemetry /
+          # stock payloads (so the build goes green without them).
+          # ---------------------------------------------------------------
+          del_step "Failure Notification"                       # Slack notifier (several copies)
+          del_step "Download topology-ip-intel stock payload"
+          del_step "Set Sentry telemetry env vars"
+          del_step "Import GPG Keys"
+          del_step "Sign DEB Packages"
+          del_step "SSH setup"
+          del_step "Upload to packages.netdata.cloud"
+          del_step "Upload to packages2.netdata.cloud"
+
+          # ---------------------------------------------------------------
+          # Scrub leftover -e secret/telemetry flags from the Build Packages
+          # docker run command. (The dots hide ${{ }} from the GH parser.)
+          # ---------------------------------------------------------------
+          sed -i 's/-e ENABLE_SENTRY=... matrix.bundle_sentry ..//g' "$PKG"
+          sed -i 's/-e RELEASE_PIPELINE=... env.RELEASE_PIPELINE ..//g' "$PKG"
+          sed -i 's/-e UPLOAD_SENTRY=... env.UPLOAD_SENTRY ..//g' "$PKG"
+          sed -i '/-e SENTRY_AUTH_TOKEN/d' "$PKG"
+          sed -i '/-e NETDATA_TOPOLOGY_IP_INTEL_STOCK_DIR/d' "$PKG"
+
+          # ---------------------------------------------------------------
+          # Sanity check: the generated workflow must be valid YAML with no
+          # duplicate keys, or GitHub rejects it before any job runs.
+          # ---------------------------------------------------------------
+          python3 - "$PKG" <<'PYEOF'
+          import sys, yaml
+          from yaml.constructor import SafeConstructor
+          dups=[]
+          orig=SafeConstructor.construct_mapping
+          def strict(self,node,deep=False):
+              seen=set()
+              for k,_ in node.value:
+                  key=self.construct_object(k,deep=True)
+                  if key in seen: dups.append((key,k.start_mark.line+1))
+                  seen.add(key)
+              return orig(self,node,deep)
+          SafeConstructor.construct_mapping=strict
+          d=yaml.safe_load(open(sys.argv[1]))
+          if dups:
+              for k,l in dups: print(f"::error::Duplicate key '{k}' at line {l} in packaging.yml")
+              sys.exit(1)
+          jobs=d.get("jobs",{})
+          names=set(jobs)
+          for j,spec in jobs.items():
+              needs=spec.get("needs") or []
+              if isinstance(needs,str): needs=[needs]
+              missing=[n for n in needs if n not in names]
+              if missing:
+                  print(f"::error::Job '{j}' needs missing job(s): {missing}")
+                  sys.exit(1)
+          print("packaging.yml validated: no duplicate keys, job graph OK")
+          PYEOF
+
+          # ---------------------------------------------------------------
+          # Commit and push the regenerated feature branch.
+          # ---------------------------------------------------------------
+          git add "src/libnetdata/user-auth/http-access.h" "$PKG"
           git commit -m "feature: bypass Netdata Cloud when accessing advanced features"
-          git push origin $FEATURE_BRANCH --force-with-lease
+          git push origin "$FEATURE_BRANCH" --force-with-lease
